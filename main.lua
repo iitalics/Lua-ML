@@ -52,11 +52,12 @@ local SYMS = {
 	{"|",   pat="|"},   {".",   pat="%."},
 	{",",   pat=","},   {"+",   pat="%+"},
 	{"-",   pat="%-"},  {"*",   pat="%*"},
-	{"/",   pat="/"},   {"=>",  pat="=>"},
-	{"=",   pat="="},   {"!=",  pat="!="},
+	{"/",   pat="/"},   {"%",   pat="%%"},
+	{";",   pat=";"},   {"=>",  pat="=>"},
+	{"=",   pat="="},   {"<>",  pat="<>"},
 	{">=",  pat=">="},  {"<=",  pat="<="},
 	{">",   pat=">"},   {"<",   pat="<"},
-	{"::",  pat="::"}
+	{"::",  pat="::"},  {"@",   pat="@"}
 }
 local KEYWORDS = {
 	"fn",   "if",   "in",   "of",
@@ -330,7 +331,7 @@ function Parse.expr (sc)
 		return {k="if", span=span, e1, e2, e3}
 
 	else -- term | expr term
-		return Parse.appl(sc)
+		return Parse.infix(sc)
 	end
 end
 -- let <decls> in <expr> end
@@ -363,6 +364,74 @@ function Parse.patternCase (sc)
 	sc:eat("=>")
 	local expr = Parse.expr(sc)
 	return {pat,expr}
+end
+-- <expr> {<op> <expr>}
+function Parse.infix (sc)
+	local fst = Parse.appl(sc)
+	local exprs = {fst}
+	local opers = {}
+
+	-- pop ops and expr and combine
+	local function reduce ()
+		local op = pop(opers)
+		local e2 = pop(exprs)
+		local e1 = pop(exprs)
+		local e = {k="infix", span=op.span, op=op.name, e1, e2}
+		push(exprs, e)
+	end
+	-- based on simultaneous shunting yard and RPN reducer
+	local function add_shunting (op)
+		while #opers > 0 and precedes(op, opers[#opers]) do
+			reduce()
+		end
+		push(opers, op)
+	end
+	-- does op1 precede op2?
+	local function precedes (op1, op2)
+		if op1.is_right then
+			return op1.prec < op2.prec
+		else
+			return op1.prec <= op2.prec
+		end
+	end
+
+	local op = Parse.infixOp(sc)
+	while op ~= nil do
+		add_shunting(op)
+		push(exprs, Parse.appl(sc))
+		op = Parse.infixOp(sc)
+	end
+	while #opers > 0 do
+		reduce()
+	end
+	return exprs[1]
+end
+local INFIX = {
+	{";",   0, false},
+	{"=",   1, false},
+	{"<>",  1, false},
+	{">",   1, false},
+	{"<",   1, false},
+	{">=",  1, false},
+	{"<=",  1, false},
+	{"::",  4, true},
+	{"@",   4, true},
+	{"+",   2, false},
+	{"-",   2, false},
+	{"*",   3, false},
+	{"/",   3, false},
+	{"%",   3, false}
+}
+function Parse.infixOp (sc)
+	for _,v in ipairs(INFIX) do
+		local t,prec,r = unpack(v)
+
+		if sc.tok == t then
+			local _,_,span = sc:shift()
+			return {name=t, is_right=r, prec=prec}
+		end
+	end
+	return nil
 end
 
 function Parse.term (sc, opt)
@@ -425,7 +494,7 @@ function Parse.pattern (sc)
 	if sc.tok == "::" then
 		local _,_,span = sc:shift()
 		local tail = Parse.pattern(sc)
-		return {k="op", op="::", span=span, pat, tail}
+		return {k="cons", span=span, pat, tail}
 	else
 		return pat
 	end
@@ -487,8 +556,18 @@ function showASTList (lst)
 end
 function showAST (e)
 	local buf = {ASTKind(e), " {"}
+	local function ignore (key)
+		if type(key) ~= "string" then
+			return true
+		elseif key == "k" or key == "decl"
+				or key == "span" then
+			return true
+		else
+			return false
+		end
+	end
 	for key,v in pairs(e) do
-		if key ~= "k" and key ~= "decl" and key ~= "span" then
+		if not ignore(key) then
 			if #buf > 2 then
 				push(buf, ", ")
 			end
@@ -496,6 +575,12 @@ function showAST (e)
 			push(buf, " = ")
 			push(buf, show(v))
 		end
+	end
+	for i,v in ipairs(e) do
+		if #buf > 2 then
+			push(buf, ", ")
+		end
+		push(buf, show(v))
 	end
 	push(buf, "}")
 	return table.concat(buf)
@@ -516,6 +601,6 @@ end
 go [[
 
 fun sum 0 = 0
-  | sum n = add (n, sum (pred n))
+  | sum n = n + sum (pred n)
 
 ]]
